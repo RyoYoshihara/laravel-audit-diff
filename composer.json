@@ -5,18 +5,23 @@
   "license": "MIT",
   "require": {
     "php": "^8.1",
-    "illuminate/support": "^10.0|^11.0",
-    "illuminate/database": "^10.0|^11.0"
+    "illuminate/database": "^10.0|^11.0",
+    "illuminate/filesystem": "^10.0|^11.0"
   },
   "autoload": {
     "psr-4": {
-      "RyoYoshihara\\LaravelAuditDiff\\": "src/"
+      "AuditDiff\\Laravel\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+     "AuditDiff\\Laravel\\Tests\\": "tests/"
     }
   },
   "extra": {
     "laravel": {
       "providers": [
-        "RyoYoshihara\\LaravelAuditDiff\\AuditServiceProvider"
+        "AuditDiff\\Laravel\\AuditServiceProvider"
       ]
     }
   },

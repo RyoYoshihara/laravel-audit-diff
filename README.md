@@ -69,7 +69,7 @@ php artisan audit-diff:install --migrate
 対象モデルに `Auditable` トレイトを追加します。
 
 ``` php
-use RyoYoshihara\LaravelAuditDiff\Traits\Auditable;
+use AuditDiff\Laravel\Traits\Auditable;
 
 class User extends Model
 {
