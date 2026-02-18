@@ -25,12 +25,13 @@ class TestCase extends Orchestra
 
         // package config
         $app['config']->set('audit-diff.enabled', true);
-        $app['config']->set('audit-diff.events', ['updated']);
+        $app['config']->set('audit-diff.events', ['created','updated','deleted']);
+        $app['config']->set('audit-diff.exclude_keys', ['remember_token']);
         $app['config']->set('audit-diff.null_equals_empty_string', true);
         $app['config']->set('audit-diff.skip_if_only_timestamps_changed', true);
         $app['config']->set('audit-diff.store_full_snapshot', false);
         $app['config']->set('audit-diff.mask_keys', ['password', 'token', 'secret', 'api_key', 'authorization']);
-        $app['config']->set('audit-diff.actor_resolver', null);
+        $app['config']->set('audit-diff.actor_resolver', fn () => ['id' => 'tester-1', 'type' => 'tests']);
     }
 
     protected function setUp(): void
@@ -60,6 +61,7 @@ class TestCase extends Orchestra
             $table->id();
             $table->string('name')->nullable();
             $table->string('password')->nullable();
+            $table->string('remember_token')->nullable();
             $table->timestamps();
         });
     }

@@ -13,126 +13,208 @@ trait Auditable
 {
     public static function bootAuditable(): void
     {
+        static::created(function (Model $model) {
+            self::recordEvent($model, 'created');
+        });
+
         static::updated(function (Model $model) {
-            if (!config('audit-diff.enabled', true)) return;
+            self::recordEvent($model, 'updated');
+        });
 
-            $events = (array) config('audit-diff.events', ['updated']);
-            if (!in_array('updated', $events, true)) return;
+        static::deleted(function (Model $model) {
+            self::recordEvent($model, 'deleted');
+        });
+    }
 
-            // changed attributes (dirty) AFTER save, we need the change set
-            // Eloquent provides getChanges() which should contain updated keys (including updated_at)
+    private static function recordEvent(Model $model, string $event): void
+    {
+        if (!config('audit-diff.enabled', true)) return;
+
+        $events = (array) config('audit-diff.events', ['updated']);
+        if (!in_array($event, $events, true)) return;
+
+        $nullEqualsEmpty = (bool) config('audit-diff.null_equals_empty_string', true);
+        $skipTimestampsOnly = (bool) config('audit-diff.skip_if_only_timestamps_changed', true);
+        $storeFullSnapshot = (bool) config('audit-diff.store_full_snapshot', false);
+
+        $maskKeys = (array) config('audit-diff.mask_keys', []);
+        $excludeKeys = (array) config('audit-diff.exclude_keys', []);
+
+        // timestamps keys
+        $timestampKeys = array_filter([
+            $model->getCreatedAtColumn(),
+            $model->getUpdatedAtColumn(),
+        ]);
+
+        // Normalize snapshots
+        $original = $model->getOriginal();
+        $attributes = $model->getAttributes();
+
+        // exclude keys (also exclude timestamps by default? -> not automatically, only config)
+        $original = self::excludeKeys($original, $excludeKeys);
+        $attributes = self::excludeKeys($attributes, $excludeKeys);
+
+        // Apply null/"" normalization on snapshots (for created/deleted snapshot storage)
+        if ($nullEqualsEmpty) {
+            $original = self::normalizeNullEmpty($original);
+            $attributes = self::normalizeNullEmpty($attributes);
+        }
+
+        $diff = null;
+        $before = null;
+        $after = null;
+
+        if ($event === 'updated') {
             $changes = $model->getChanges();
             if (empty($changes)) return;
 
-            // Determine original values for changed keys
-            $before = [];
-            $after = [];
-            $diff = [];
-
-            $nullEqualsEmpty = (bool) config('audit-diff.null_equals_empty_string', true);
-            $skipTimestampsOnly = (bool) config('audit-diff.skip_if_only_timestamps_changed', true);
-            $storeFullSnapshot = (bool) config('audit-diff.store_full_snapshot', false);
-
-            // keys to exclude from diff by default (timestamps)
-            $timestampKeys = array_filter([
-                $model->getCreatedAtColumn(),
-                $model->getUpdatedAtColumn(),
-            ]);
-
-            // If store_full_snapshot is enabled, we will store entire attribute set in before/after,
-            // but diff remains only changed keys.
-            if ($storeFullSnapshot) {
-                $beforeSnapshot = $model->getOriginal();
-                $afterSnapshot = $model->getAttributes();
+            // Remove excluded keys from changes early
+            foreach ($excludeKeys as $k) {
+                unset($changes[$k]);
             }
+
+            $beforePartial = [];
+            $afterPartial = [];
+            $diffPartial = [];
 
             foreach (array_keys($changes) as $key) {
                 $old = $model->getOriginal($key);
                 $new = Arr::get($model->getAttributes(), $key);
+
+                if (in_array($key, $excludeKeys, true)) {
+                    continue;
+                }
 
                 if ($nullEqualsEmpty) {
                     $old = ($old === '') ? null : $old;
                     $new = ($new === '') ? null : $new;
                 }
 
-                // If no actual semantic change, skip key
                 if ($old === $new) {
                     continue;
                 }
 
-                $before[$key] = $old;
-                $after[$key] = $new;
+                $beforePartial[$key] = $old;
+                $afterPartial[$key] = $new;
 
-                $diff[$key] = [
+                $diffPartial[$key] = [
                     'before' => $old,
                     'after' => $new,
                 ];
             }
 
-            // If only timestamps changed, skip
+            if (empty($diffPartial)) return;
+
+            // only timestamps?
             if ($skipTimestampsOnly) {
-                $nonTimestampKeys = array_diff(array_keys($diff), $timestampKeys);
+                $nonTimestampKeys = array_diff(array_keys($diffPartial), $timestampKeys);
                 if (empty($nonTimestampKeys)) {
                     return;
                 }
             }
 
-            // If diff is empty after normalization, skip
-            if (empty($diff)) return;
+            // decide before/after storage
+            if ($storeFullSnapshot) {
+                $before = $original;
+                $after = $attributes;
+            } else {
+                $before = $beforePartial;
+                $after = $afterPartial;
+            }
 
-            // Apply masking
-            $maskKeys = (array) config('audit-diff.mask_keys', []);
-            if (!empty($maskKeys)) {
-                if ($storeFullSnapshot) {
-                    $beforeSnapshot = Masker::mask((array) $beforeSnapshot, $maskKeys);
-                    $afterSnapshot  = Masker::mask((array) $afterSnapshot, $maskKeys);
-                } else {
-                    $before = Masker::mask($before, $maskKeys);
-                    $after  = Masker::mask($after, $maskKeys);
-                }
+            $diff = $diffPartial;
+        }
 
-                // diff uses same primitive values, rebuild from masked before/after for changed keys
+        if ($event === 'created') {
+            // created: store snapshot (after) / diff null
+            $diff = null;
+
+            if ($storeFullSnapshot) {
+                $before = null;
+                $after = $attributes;
+            } else {
+                // MVP: afterに全属性（除外済み）を入れる
+                $before = null;
+                $after = $attributes;
+            }
+        }
+
+        if ($event === 'deleted') {
+            // deleted: store snapshot (before) / diff null
+            $diff = null;
+
+            if ($storeFullSnapshot) {
+                $before = $original;
+                $after = null;
+            } else {
+                // MVP: beforeに全属性（除外済み）を入れる
+                $before = $original;
+                $after = null;
+            }
+        }
+
+        // Masking (apply to before/after + diff)
+        if (!empty($maskKeys)) {
+            if (is_array($before)) $before = Masker::mask($before, $maskKeys);
+            if (is_array($after)) $after = Masker::mask($after, $maskKeys);
+
+            if (is_array($diff)) {
                 $maskedDiff = [];
                 foreach ($diff as $k => $_) {
                     $maskedDiff[$k] = [
-                        'before' => $storeFullSnapshot ? Arr::get($beforeSnapshot, $k) : Arr::get($before, $k),
-                        'after'  => $storeFullSnapshot ? Arr::get($afterSnapshot, $k) : Arr::get($after, $k),
+                        'before' => is_array($before) ? Arr::get($before, $k) : ($diff[$k]['before'] ?? null),
+                        'after'  => is_array($after) ? Arr::get($after, $k) : ($diff[$k]['after'] ?? null),
                     ];
                 }
                 $diff = $maskedDiff;
             }
+        }
 
-            // Actor
-            $actor = ActorResolver::resolve();
+        $actor = ActorResolver::resolve();
+        $meta = self::resolveRequestMeta();
 
-            // Request metadata (nullable for CLI/queue)
-            $meta = self::resolveRequestMeta();
+        $log = new AuditLog();
+        $log->auditable_type = get_class($model);
+        $log->auditable_id = (string) $model->getKey();
+        $log->event = $event;
 
-            // Save
-            $log = new AuditLog();
-            $log->auditable_type = get_class($model);
-            $log->auditable_id = (string) $model->getKey();
-            $log->event = 'updated';
-            $log->actor_id = $actor['id'];
-            $log->actor_type = $actor['type'];
+        $log->actor_id = $actor['id'];
+        $log->actor_type = $actor['type'];
 
-            $log->diff = $diff;
-            if ($storeFullSnapshot) {
-                $log->before = $beforeSnapshot ?? null;
-                $log->after  = $afterSnapshot ?? null;
+        $log->diff = $diff;
+        $log->before = $before;
+        $log->after = $after;
+
+        $log->url = $meta['url'];
+        $log->method = $meta['method'];
+        $log->ip = $meta['ip'];
+        $log->user_agent = $meta['user_agent'];
+
+        $log->created_at = now();
+        $log->save();
+    }
+
+    /** @param array<string,mixed> $data */
+    private static function excludeKeys(array $data, array $excludeKeys): array
+    {
+        foreach ($excludeKeys as $k) {
+            unset($data[$k]);
+        }
+        return $data;
+    }
+
+    /** @param array<string,mixed> $data */
+    private static function normalizeNullEmpty(array $data): array
+    {
+        $out = [];
+        foreach ($data as $k => $v) {
+            if (is_array($v)) {
+                $out[$k] = self::normalizeNullEmpty($v);
             } else {
-                $log->before = $before;
-                $log->after  = $after;
+                $out[$k] = ($v === '') ? null : $v;
             }
-
-            $log->url = $meta['url'];
-            $log->method = $meta['method'];
-            $log->ip = $meta['ip'];
-            $log->user_agent = $meta['user_agent'];
-
-            $log->created_at = now();
-            $log->save();
-        });
+        }
+        return $out;
     }
 
     /**
