@@ -1,216 +1,161 @@
-# Laravel Audit Diff
+# laravel-audit-diff
 
-Eloquent モデルの更新差分（before / after）を自動で記録する Laravel
-パッケージです。
+Laravel Eloquent モデルの変更差分（Diff）を自動記録する監査ログパッケージです。  
+created / updated / deleted イベントに対応し、変更キーのみを保存する軽量設計を採用しています。
 
-SaaS や業務システムにおける監査ログ・変更履歴管理を目的としています。
+---
 
-------------------------------------------------------------------------
+## ✨ 特徴
 
-## バージョン
+- created / updated / deleted イベント対応
+- 変更されたキーのみを保存（Diff方式）
+- パスワード等のマスキング機能
+- 除外キー（exclude_keys）設定可能
+- actor_resolver による柔軟なユーザー識別
+- updated_at のみ変更時はログスキップ可能
+- JSON形式で before / after を保存
 
--   Ver.0.1.0 MVP
+---
 
-------------------------------------------------------------------------
+## 📦 インストール
 
-## 🎯 目的
-
--   誰が
--   いつ
--   どこで
--   何を変更したか
-
-を、差分付きで永続化します。
-
-コンプライアンス対応、問い合わせ調査、運用ログ用途を想定しています。
-
-------------------------------------------------------------------------
-
-# 🚀 インストール
-
-``` bash
-composer require ryoyoshihara/laravel-audit-diff
+```bash
+composer require ryoyoshihara/laravel-audit-diff:^0.2
 ```
 
-------------------------------------------------------------------------
+設定・マイグレーション生成：
 
-# ⚙ 初期セットアップ（推奨）
-
-``` bash
+```bash
 php artisan audit-diff:install --migrate
 ```
 
-このコマンドは：
+---
 
--   config ファイル publish
--   migration ファイル publish
--   マイグレーション実行（--migrate 指定時）
+## 🚀 使用方法
 
-を自動で行います。
+### 1. モデルに Trait を追加
 
-------------------------------------------------------------------------
-
-## install コマンド詳細
-
-### 基本
-
-``` bash
-php artisan audit-diff:install
-```
-
--   config 未存在時のみ publish
--   migration 未存在時のみ publish
--   既存ファイルは上書きしません
-
-### マイグレーションまで実行
-
-``` bash
-php artisan audit-diff:install --migrate
-```
-
-------------------------------------------------------------------------
-
-# 🧪 使用方法
-
-対象モデルに `Auditable` トレイトを追加します。
-
-``` php
+```php
 use AuditDiff\Laravel\Traits\Auditable;
 
-class User extends Model
+class Post extends Model
 {
     use Auditable;
 }
 ```
 
-モデル更新時、自動で `audit_logs` テーブルに差分が保存されます。
+これだけで変更が自動記録されます。
 
-------------------------------------------------------------------------
+---
 
-# 📊 保存されるデータ
+## 🗂 保存される形式
 
-  カラム           説明
-  ---------------- --------------------------
-  auditable_type   モデルクラス名
-  auditable_id     モデルID
-  event            updated
-  actor_id         変更者ID
-  actor_type       変更者モデル
-  diff             変更差分
-  before           変更前値（変更キーのみ）
-  after            変更後値（変更キーのみ）
-  url              リクエストURL
-  method           HTTPメソッド
-  ip               IPアドレス
-  user_agent       UserAgent
-  created_at       記録日時
+### updated の場合
 
-------------------------------------------------------------------------
-
-# 🔐 actor（誰が変更したか）
-
-デフォルトでは：
-
-``` php
-auth()->user()
-```
-
-から取得します。
-
-### カスタム actor を使用する場合
-
-config/audit-diff.php:
-
-``` php
-'actor_resolver' => function () {
-    return [
-        'id' => session('admin_login.id'),
-        'type' => \App\Models\AdminUser::class,
-    ];
-},
-```
-
-------------------------------------------------------------------------
-
-# 🛡 マスキング
-
-以下のキーは自動で `***` に置換されます。
-
-``` php
-'mask_keys' => [
-    'password',
-    'token',
-    'secret',
-    'api_key',
-],
-```
-
-ネストした配列も再帰的にマスクされます。
-
-------------------------------------------------------------------------
-
-# 🔄 差分仕様
-
-diff は以下形式で保存されます。
-
-``` json
+```json
 {
-  "name": { "before": "A", "after": "B" }
+  "name": {
+    "before": "A",
+    "after": "B"
+  }
 }
 ```
 
-------------------------------------------------------------------------
+### created の場合
 
-# ⚖ null と空文字の扱い
+- diff: null
+- after: 作成時スナップショット
 
-デフォルトでは：
+### deleted の場合
 
-``` php
-'null_equals_empty_string' => true
+- diff: null
+- before: 削除前スナップショット
+
+---
+
+## ⚙ 設定（config/audit-diff.php）
+
+```php
+return [
+
+    'enabled' => true,
+
+    'events' => ['created', 'updated', 'deleted'],
+
+    'null_equals_empty_string' => true,
+
+    'skip_if_only_timestamps_changed' => true,
+
+    'store_full_snapshot' => false,
+
+    'mask_keys' => [
+        'password',
+        'token',
+        'secret',
+        'api_key',
+    ],
+
+    'exclude_keys' => [
+        'remember_token',
+    ],
+
+    'actor_resolver' => null,
+];
 ```
 
-空文字と null を同一視します。
+---
 
-------------------------------------------------------------------------
+## 👤 actor_resolver 例
 
-# 🚫 updated_at のみ変更された場合
-
-``` php
-'skip_if_only_timestamps_changed' => true
+```php
+'actor_resolver' => fn () => [
+    'id' => 'demo-user-1',
+    'type' => 'demo',
+],
 ```
 
-の場合、ログは記録されません。
+ログインユーザーを使用する場合は、独自実装も可能です。
 
-------------------------------------------------------------------------
+---
 
-# 🧩 設計思想
+## 🔒 マスキング
 
--   最小設定で動作
--   導入は1コマンド
--   差分のみ保存（デフォルト）
--   認証方式に依存しない設計
--   セキュリティ配慮（mask_keys）
+mask_keys に指定したキーは以下のように保存されます：
 
-------------------------------------------------------------------------
+```json
+{
+  "password": {
+    "before": "***",
+    "after": "***"
+  }
+}
+```
 
-# 📌 v0.1 制限事項
+---
 
--   updated イベントのみ対応
--   created / deleted は今後対応予定
--   大量バルク更新には未対応
+## 🧪 テスト対応
 
-------------------------------------------------------------------------
+- created / updated / deleted 検証済み
+- exclude_keys 検証済み
+- mask_keys 検証済み
+- timestamps-only update スキップ検証済み
 
-# 🔮 今後の拡張予定
+---
 
--   created / deleted 対応
--   モデルごとの除外フィールド指定
--   UI提供
--   非同期保存（Queue）
--   Packagist 公開
+## 📊 デモ構成
 
-------------------------------------------------------------------------
+- Post CRUD
+- Audit Log 一覧表示
+- Diff 表示（before / after）
 
-# License
+---
+
+## 🏷 バージョン
+
+v0.2.0
+
+---
+
+## 📄 ライセンス
 
 MIT
